@@ -109,18 +109,18 @@ def find_button_and_click(template_path, interval_minutes, duration_minutes, tar
 
         time.sleep(interval_seconds)
 
-# if __name__ == "__main__":
-#     # Check and request for admin privileges
-#     run_as_admin()
+if __name__ == "__main__":
+    # Check and request for admin privileges
+    run_as_admin()
 
-#     # Path to your image file of the button
-#     template_image_path = "pull.png"
+    # Path to your image file of the button
+    template_image_path = "pull.png"
 
-#     # Set intervals and durations for clicks
-#     interval_minutes = 5  # Click every 5 minutes
-#     duration_minutes = 60  # Run script for 60 minutes
+    # Set intervals and durations for clicks
+    interval_minutes = 5  # Click every 5 minutes
+    duration_minutes = 60  # Run script for 60 minutes
 
-#     # Specify part of the window title to bring it to the front
-#     partial_title = "주식회사 코린토"
+    # Specify part of the window title to bring it to the front
+    partial_title = "주식회사 코린토"
 
-#     find_button_and_click(template_image_path, interval_minutes, duration_minutes, partial_title)
+    find_button_and_click(template_image_path, interval_minutes, duration_minutes, partial_title)
