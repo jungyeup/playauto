@@ -1,3 +1,4 @@
+# AnswerGenerator.py
 import logging
 from openai import OpenAI
 import pandas as pd
@@ -8,7 +9,6 @@ import threading
 import ctypes
 import time
 import requests
-import re
 from ocr_handler import OCRHandler
 
 # Initialize logging
@@ -17,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 class AnswerGenerator:
     def __init__(self, openai_api_key, data_folder='data'):
-        # Initialize OpenAI client and model
         self.client = OpenAI(api_key=openai_api_key)
         self.system_prompt = """
             당신은 자사 쇼핑몰 고객 문의에 응답하는 친절한 상담원입니다. 한국어 문법을 정확히 지키고, 띄어쓰기도 정확하게 합니다.
@@ -112,7 +111,6 @@ class AnswerGenerator:
         self.index = self.create_faiss_index(self.embeddings)
 
     def load_all_excel_files(self, folder_path):
-        """Load Excel files and combine into a single DataFrame."""
         combined_df = pd.DataFrame()
         try:
             for file_name in os.listdir(folder_path):
@@ -127,12 +125,10 @@ class AnswerGenerator:
             raise
 
     def generate_embeddings(self, texts):
-        """Generate embeddings using the SentenceTransformer model."""
         logger.info("Generating embeddings...")
         return self.model.encode(texts)
 
     def create_faiss_index(self, embeddings):
-        """Create a FAISS index from the embeddings."""
         if embeddings.shape[0] == 0:
             logger.error("No embeddings provided to create index")
             raise ValueError("No embeddings to index.")
@@ -140,56 +136,53 @@ class AnswerGenerator:
         index.add(embeddings)
         logger.info("FAISS index created.")
         return index
-
+    
     def show_popup_non_blocking(self, message):
-        """Display a non-blocking popup message."""
         def popup(message):
             message_box_styles = 0x00000040 | 0x00000000 | 0x00040000 | 0x00001000
             ctypes.windll.user32.MessageBoxW(0, message, "중요한 문의 내용입니다", message_box_styles)
-
         threading.Thread(target=popup, args=(message,), daemon=True).start()
 
-    def find_similar_question_with_product(self, question, product_name):
-        """Find questions similar to the provided one, matching them with a product."""
-        logger.info("Finding similar questions with product match...")
+    def find_similar_questions(self, question):
+        logger.info("Finding similar questions based on '문의내용'...")
         try:
             question_embedding = self.model.encode([question])
             distances, indices = self.index.search(question_embedding, 10)
 
-            # Ensure indices is not empty before proceeding
             if indices.size == 0 or not len(indices[0]):
                 logger.warning("No similar questions found.")
                 return []
 
             similar_questions = []
-
             for idx in indices[0]:
                 if 0 <= idx < len(self.df):
                     entry = self.df.iloc[idx]
-                    is_product_name_match = entry['상품명'] == product_name
-                    is_high_similarity = (100 - distances[0][indices[0].tolist().index(idx)]) > 90
-                    if is_product_name_match or is_high_similarity:
-                        similar_questions.append((entry, 100 - distances[0][indices[0].tolist().index(idx)]))
+                    similarity_score = 100 - distances[0][indices[0].tolist().index(idx)]
+                    if similarity_score > 50:
+                        importance = 'High, 모범답안 입니다. 수치는 참고하지 말고 답변 형식을 참고하십시오.'
+                    elif similarity_score > 0:
+                        importance = 'Medium, 유사 답변입니다. 답변을 참고하지만 수치는 참고하지 말고 답변 형식만을 참고하십시오'
+                    else:
+                        importance = 'Low, 틀린 답변입니다. 답변의 수치와 숫자는 참고하지 말고 형식만을 참고하십시오.'
+
+                    similar_questions.append({
+                        'entry': entry,
+                        'similarity_score': similarity_score,
+                        'importance': importance
+                    })
             return similar_questions
+            
         except Exception as e:
             logger.error(f"Error in finding similar questions: {e}")
             return []
 
     def check_stock(self, master_code):
-        """Check stock for the given master code."""
         if not master_code:
             return "정보를 확인할 수 없습니다."
 
         url = "https://api.e3pl.kr/ai/"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json"
-        }
-        payload = {
-            "m": "stock",
-            "c": master_code,
-            "s": "kazmi"
-        }
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        payload = {"m": "stock", "c": master_code, "s": "kazmi"}
 
         try:
             response = requests.post(url, headers=headers, json=payload)
@@ -199,7 +192,6 @@ class AnswerGenerator:
             if 'application/json' in content_type:
                 stock_data = response.json()
                 if stock_data.get('success'):
-                    # Retrieve 'result' and fallback to an empty list if not present
                     results = stock_data.get('result', [])
                     if results and results[0].get('ea', 0) > 0:
                         return "상품이 재고가 있습니다."
@@ -218,11 +210,11 @@ class AnswerGenerator:
 
         return "정보를 확인할 수 없습니다."
 
-    def generate_answer(self, question, summaries, product_info, inquiry_data, product_name, comment_time=None, order_states=None, image_urls=None):
+    def generate_answer(self, question, combined_summary, product_info, inquiry_data, product_name=None, comment_time=None, order_states=None, image_urls=None):
         logger.info("Generating answer for question...")
-        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-
         try:
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+
             category_info = self.classify_question(question)
             categories = self.extract_category_from_classification(category_info)
 
@@ -233,19 +225,17 @@ class AnswerGenerator:
                 logger.warning("Product info is not a dictionary.")
                 return "죄송합니다, 제품 정보를 처리할 수 없습니다."
 
-            if not isinstance(summaries, list) or not all(isinstance(summary, dict) and 'summary' in summary for summary in summaries):
-                logger.warning("Missing or malformed summaries.")
-                return "죄송합니다, 화면에 표시 가능한 데이터를 찾을 수 없습니다."
-
             master_code = inquiry_data.get('MasterCode', '')
             stock_status = self.check_stock(master_code)
             logger.info(f"Stock status: {stock_status}")
 
-            image_summary = " ".join([str(summary.get('summary', '')) for summary in summaries])
-            similar_questions = self.find_similar_question_with_product(question, product_name)
+            similar_questions = self.find_similar_questions(question)
             similar_question_prompt = "".join([
-                f"\n\nQ: {sq.get('문의내용', '')}\nA: {sq.get('답변내용', '기존 데이터베이스에 답변이 없습니다.')}\n\n"
-                for sq, score in similar_questions if len(similar_questions) > 0
+                f"\n\nImportance: {sq.get('importance', 'Unknown')}\n"
+                f"Similarity Score: {sq.get('similarity_score', 0)}\n"
+                f"Q: {sq['entry'].get('문의내용', '')}\n"
+                f"A: {sq['entry'].get('답변내용', '기존 데이터베이스에 답변이 없습니다.')}\n\n"
+                for sq in similar_questions
             ]) or "죄송합니다. 데이터베이스에서 유사한 질문을 찾을 수 없습니다."
 
             specific_prompt = self.get_specific_prompt(categories)
@@ -254,15 +244,14 @@ class AnswerGenerator:
                 [f"{key}: {value}" for key, value in product_info.items() if key != 'ProductName']
             )
             response_data_details = "\n".join([f"{key}: {value}" for key, value in inquiry_data.items()])
-            print(f"상품명:{product_name},\n\n\n질문:{question},\n\n\n주문상태:{order_states},\n\n\n상품정보:{product_details},\n\n\nOCR요약{image_summary},\n\n\n문의 상세내용:{response_data_details},\n\n\n재고유무:{stock_status},\n\n\n비슷한 질문의 답변:{similar_question_prompt}\n\n\n특정카테고리 프롬프트:{specific_prompt}\n\n\n")
+            print(f"상품명:{product_name},\n\n\n질문:{question},\n\n\n주문상태:{order_states},\n\n\n상품정보:{product_details},\n\n\nOCR 요약:{combined_summary},\n\n\n문의 상세내용:{response_data_details},\n\n\n재고유무:{stock_status},\n\n\n비슷한 질문의 답변:{similar_question_prompt}\n\n\n특정카테고리 프롬프트:{specific_prompt}\n\n\n")
             answer_prompt = f"""
             제공된 제품 정보, 유사 질문 답변 및 재고 정보를 바탕으로 다음 문의에 답변해 주세요. 제품명과 고객질문을 언급하지 말아주세요.
             제품명: {product_name}
             고객 질문과 주문상태: {question}
             주문 상태: {order_states}
             제품 정보: {product_details}
-            이미지 URL: {', '.join(image_urls) if image_urls else '이미지 URL 없음'}
-            이미지 정보: {image_summary}
+            이미지 분석 및 OCR 결론: {combined_summary}
             추가 문의 정보: {response_data_details}
             재고 상황: {stock_status}
             {similar_question_prompt}
@@ -272,7 +261,6 @@ class AnswerGenerator:
             if comment_time:
                 answer_prompt += f"\n\n질문 시간: {comment_time}, 현재 시간: {current_time}"
 
-            # Single API call
             chat_completion = self.client.chat.completions.create(
                 model="gpt-4o",
                 temperature=0.7,
@@ -286,23 +274,22 @@ class AnswerGenerator:
             return answer
 
         except Exception as e:
-            print(f"답변 생성 오류: {e}")
+            logger.error(f"답변 생성 오류: {e}")
             return "죄송합니다, 답변을 생성할 수 없습니다."
 
     def revise_answer(self, user_input, original_answer):
-        """Revise an answer based on user input."""
         logger.info("Revising answer...")
         try:
             revision_prompt = f"""
             수정 전 답변: {original_answer}
             사용자 입력: {user_input}
-            사용자의 입력을 반영하여 답변을 생성해주세요.
-            만약 입력한 내용이 작은 따움표('')사이에 입력한 경우 해당 내용을 받드시 그대로 답변으로 사용/출력 하십시오.
+            사용자의 입력을 최대한 반영하여 답변을 생성해주세요.
+            사용자 입력이 작은 따움표('')안에 입력한 경우 해당 내용을 받드시 그대로 답변으로 사용/출력 하십시오, 절대 변형하거나 재생성 혹은 추가 답변을 하지 마십시오.
             """
 
             chat_completion = self.client.chat.completions.create(
                 model="gpt-4o",
-                temperature=0.7,
+                temperature=0.3,
                 messages=[
                     {"role": "system", "content": self.system_prompt},
                     {"role": "user", "content": revision_prompt}
@@ -319,7 +306,6 @@ class AnswerGenerator:
             return original_answer
 
     def check_if_important_question(self, question):
-        """Check if a question is important and requires immediate attention."""
         try:
             check_prompt = f"""
             다음 고객 문의가 아래 카테고리와 관련이 있는지 판단해 주세요.
@@ -336,6 +322,7 @@ class AnswerGenerator:
             - 출시 예정
             - 상품 간의 차이
             - 사용법/호환성
+            - 계산서 관련
 
             고객 문의: {question}
 
@@ -363,7 +350,6 @@ class AnswerGenerator:
             return False
 
     def classify_question(self, question):
-        """Classify the question into relevant categories."""
         try:
             classification_prompt = f"""
             다음 고객 문의를 관련된 모든 카테고리로 분류해 주세요. 여러 카테고리가 관련된 경우 모두 표시해 주세요.
@@ -382,6 +368,7 @@ class AnswerGenerator:
             - 출시 예정
             - 상품 간의 차이
             - 사용법/호환성
+            - 계산서 관련
 
             고객 문의: {question}
             """
@@ -406,7 +393,6 @@ class AnswerGenerator:
             return "기타 질문"
 
     def extract_category_from_classification(self, category_info):
-        """Extract category from the classification result."""
         categories = [
             "제품 리뷰", "재고/입고/배송", "AS (수리, 반품, 교환)",
             "사용법/호환성", "제품 문의", "할인 문의", "기술 지원", "기타 질문"
@@ -495,7 +481,7 @@ class AnswerGenerator:
             추가 정보를 요구하지 않습니다.
             단종은 아니지만 재입고 날짜가 확정되지 않아 당분간은 구매가 어렵습니다.
             오후1시 이전 주문건은 당일 출고가 됩니다.
-            오후1시 이후 주문건은 익일 출고가 됩니다.
+            오후1시 이후 주문건은 익일출고가 됩니다.
             """
         }
         prompt = "\n".join([category_prompts[cat] for cat in categories])

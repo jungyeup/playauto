@@ -1,5 +1,6 @@
-import requests
+# testapi.py
 import logging
+import requests
 import time
 import pandas as pd
 import os
@@ -9,6 +10,7 @@ from ocr_handler import OCRHandler
 from report_generator import ReportGenerator
 from dotenv import load_dotenv
 import ctypes
+import threading
 import warnings
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
@@ -38,7 +40,7 @@ class QuestionHandler:
         self.excel_file_path = "data/questions_answers.xlsx"
         self.init_excel_file(self.excel_file_path)
         self.df = pd.DataFrame(columns=[
-            "작성시간", "상품명", "문의내용", "답변내용", "수정내용", "OCR내용", "특이사항", "Product Summary", "LastModifiedTime"
+            "작성시간", "상품명", "모델명", "문의내용", "답변내용", "수정내용", "OCR내용", "특이사항", "LastModifiedTime"
         ])
         if os.path.exists(self.excel_file_path):
             self.existing_data = pd.read_excel(self.excel_file_path)
@@ -49,7 +51,7 @@ class QuestionHandler:
     def init_excel_file(self, file_path):
         if not os.path.exists(file_path):
             df = pd.DataFrame(columns=[
-                "작성시간", "상품명", "문의내용", "답변내용", "수정내용", "OCR내용", "특이사항", "Product Summary", "LastModifiedTime"
+                "작성시간", "상품명", "모델명", "문의내용", "답변내용", "수정내용", "OCR내용", "특이사항", "LastModifiedTime"
             ])
             df.to_excel(file_path, index=False)
 
@@ -80,6 +82,7 @@ class QuestionHandler:
     def fetch_inquiries(self) -> List[Dict[str, Any]]:
         headers = {'X-API-KEY': API_KEY}
         params = {'states': '신규', 'page': 1, 'count': 100}
+        
         try:
             response = requests.get(INQUIRY_LIST_URL, headers=headers, params=params)
             response.raise_for_status()
@@ -95,6 +98,7 @@ class QuestionHandler:
                 if not isinstance(item, dict):
                     logger.error("Non-dictionary item found in response_data.")
                     return []
+
             return response_data
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch inquiries: {e}")
@@ -112,10 +116,19 @@ class QuestionHandler:
                     return True
         return False
 
-    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str:
+    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str: 
         validated_summaries = [{'summary': s} for s in summaries]
         try:
-            return self.answer_generator.generate_answer(question, validated_summaries, product_info, inquiry_data, product_name, comment_time, order_states, image_urls)
+            return self.answer_generator.generate_answer(
+                question=question,
+                combined_summary=summaries[0],  # Pass the combined_summary for use directly
+                product_info=product_info,
+                inquiry_data=inquiry_data,
+                product_name=product_name,
+                comment_time=comment_time,
+                order_states=order_states,
+                image_urls=image_urls
+            )
         except Exception as e:
             logger.error(f"Failed to generate answer: {e}")
             raise RuntimeError(f"Failed to generate answer: {e}")
@@ -146,9 +159,8 @@ class QuestionHandler:
                     result_status = response_data[0].get('status', None)
                     if result_status:
                         logger.info(f"Answer sent successfully: {response_data}")
-            elif isinstance(response_data, dict):
-                if response_data.get('status'):
-                    logger.info(f"Answer sent successfully: {response_data}")
+            elif isinstance(response_data, dict) and response_data.get('status'):
+                logger.info(f"Answer sent successfully: {response_data}")
             else:
                 logger.error(f"Unexpected response data format: {type(response_data)}")
             return response_data
@@ -171,6 +183,7 @@ class QuestionHandler:
                 return {}, []
 
             image_urls = [product_info.get(f'Image{i}') for i in range(1, 11) if product_info.get(f'Image{i}')]
+
             content_image_urls = self.ocr_handler.extract_image_urls_from_html(product_info.get('Content', ''))
             content_ad_image_urls = self.ocr_handler.extract_image_urls_from_html(product_info.get('ContentAd', ''))
             all_image_urls = image_urls + content_image_urls + content_ad_image_urls
@@ -183,40 +196,16 @@ class QuestionHandler:
             logger.error(f"Failed to fetch product information: {e}")
             return {}, []
 
-    def generate_product_summary(self, product_info: Dict[str, Any], summaries: List[str]) -> str:
-        product_name = product_info.get('ProdName', '해당 제품')
-
-        product_details = f"상품명: {product_name}\n" + "\n".join([f"{key}: {value}" for key, value in product_info.items() if key != 'ProductName'])
-        summary_prompt = f"""
-        제공된 제품 정보 및 OCR 요약을 바탕으로 다음 제품에 대해 종합적인 분석을 해주세요. 상세한 설명, 사용 방법, 타겟 소비자층, 가격, 고객 리뷰 등을 포함해 주세요.
-        제품명: {product_name}
-        제품 정보: {product_details}
-        OCR 요약: {' '.join(summaries)}
-        """
-
-        try:
-            chat_completion = self.answer_generator.client.chat.completions.create(
-                model="gpt-4o",
-                temperature=0.7,
-                messages=[
-                    {"role": "system", "content": self.answer_generator.system_prompt},
-                    {"role": "user", "content": summary_prompt}
-                ]
-            )
-            summary = chat_completion.choices[0].message.content
-            return summary
-
-        except Exception as e:
-            logger.error(f"Failed to generate product summary: {e}")
-            return "제품 요약을 생성할 수 없습니다."
-
     def handle_emergency(self, qtype: str, clean_question: str):
-        ctypes.windll.user32.MessageBoxW(
-            0,
-            f"긴급공지 / 긴급메세지:\n\n{qtype}:\n{clean_question}",
-            "긴급공지 / 긴급메세지",
-            0x10  # MB_ICONHAND (red warning icon with OK button)
-        )
+        def show_message_box():
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"긴급공지 / 긴급메세지:\n\n{qtype}:\n{clean_question}",
+                "긴급공지 / 긴급메세지",
+                0x10  # MB_ICONHAND (red warning icon with OK button)
+            )
+        message_thread = threading.Thread(target=show_message_box)
+        message_thread.start()
 
     def handle_question(self, inquiry):
         logger.debug(f"Handling inquiry: {inquiry}")
@@ -269,28 +258,29 @@ class QuestionHandler:
 
             if not existing_entry.empty and not force_ocr:
                 logger.info(f"Using existing OCR content for product: {product_name}")
-                ocr_content = existing_entry.iloc[0]['OCR내용']
-                combined_ocr_summaries = ocr_content if isinstance(ocr_content, list) else [ocr_content]
+                combined_summaries = existing_entry.iloc[0]['OCR내용']
             else:
                 logger.info(f"No existing OCR content found for product: {product_name} or forcing OCR...")
-                html_ocr_summaries = self.ocr_handler.ocr_from_html_content(inquiry.get('HTMLContent', '')) if 'HTMLContent' in inquiry else []
+                html_content = inquiry.get('HTMLContent', '')
+                html_ocr_summaries = self.ocr_handler.ocr_from_html_content(html_content)
                 image_ocr_summaries = self.ocr_handler.ocr_from_image_urls(all_image_urls)
                 combined_ocr_summaries = html_ocr_summaries + image_ocr_summaries
+
+                combined_summaries = self.ocr_handler.summarize_summaries(combined_ocr_summaries)
                 if not combined_ocr_summaries:
-                    combined_ocr_summaries = ["OCR을 통한 유효한 데이터를 찾을 수 없습니다."]
+                    combined_summaries = "OCR을 통한 유효한 데이터를 찾을 수 없습니다."
 
             self.answer_generator.check_if_important_question(question)
 
-            # Pass `order_state_summary` and `all_image_urls` to generate_answer
             answer = self.generate_answer(
-                question,
-                combined_ocr_summaries,
-                product_info,
-                inquiry,
-                product_name,
-                write_date,
-                order_state_summary,
-                all_image_urls
+                question=question,
+                summaries=[combined_summaries],  # Pass the combined_summaries directly
+                product_info=product_info,
+                inquiry_data=inquiry,
+                product_name=product_name,
+                comment_time=write_date,
+                order_states=order_state_summary,
+                image_urls=all_image_urls
             )
             self.results_to_process.append({
                 "qna_id": qna_id,
@@ -301,7 +291,8 @@ class QuestionHandler:
                 "special_note": "답변 생성됨",
                 "status": "Generated",
                 "product_name": product_name,
-                "combined_ocr_summaries": combined_ocr_summaries,
+                "master_code": master_code,
+                "combined_ocr_summaries": combined_summaries,
                 "write_date": write_date,
                 "product_info": product_info,
                 "inquiry": inquiry
@@ -316,24 +307,24 @@ class QuestionHandler:
             while True:
                 print(f"\n\n====================================================================================================")
                 print(f"상품명: {result['product_name']}\n\n질문:\n{result['question']}\n\n생성된 답변:\n{result['answer']}\n")
-                user_input = input("답변을 수정하거나 추가하십시오. 업로드를 취소하려면 '취소' 혹은 'c'를 입력하고, 재생성을 원하시면 '재생성' 혹은 're', 그대로 업로드 하실려면 Enter를 누르세요: ").strip().lower()
+                user_input = input("답변을 수정하거나 추가하십시오. 업로드를 취소하려면 '취소','ㅊ' 혹은 'c'를 입력하고, 재생성을 원하시면 '재생성','ㄱㄷ' 혹은 're', 그대로 업로드 하실려면 Enter를 누르세요: ").strip().lower()
 
-                if user_input in ['c', '취소']:
+                if user_input in ['c', '취소', 'ㅊ']:
                     print("업로드가 취소되었습니다.")
                     result['status'] = "Canceled"
                     result['special_note'] = "답변 업로드 취소됨"
                     break
 
-                if user_input in ['re', '재생성']:
+                if user_input in ['re', '재생성', 'ㄱㄷ']:
                     result['answer'] = self.generate_answer(
-                        result['question'],
-                        result['combined_ocr_summaries'],
-                        result['product_info'],
-                        result['inquiry'],
-                        result['product_name'],
-                        result['write_date'],
-                        result['order_states'],
-                        result['image_urls']
+                        question=result['question'],
+                        summaries=[self.ocr_handler.summarize_summaries(result['combined_ocr_summaries'])],
+                        product_info=result['product_info'],
+                        inquiry_data=result['inquiry'],
+                        product_name=result['product_name'],
+                        comment_time=result['write_date'],
+                        order_states=result.get('order_state_summary'),
+                        image_urls=result.get('image_urls')
                     )
                     result['original_answer'] = result['answer']
                     result['modification_note'] = "자동 생성된 답변 (재생성)"
@@ -354,12 +345,12 @@ class QuestionHandler:
                 new_entry = pd.DataFrame({
                     "작성시간": [current_time],
                     "상품명": [result['product_name']],
+                    "모델명": [result['master_code']],
                     "문의내용": [result['question']],
                     "답변내용": [result['answer']],
                     "수정내용": [result['modification_note']],
                     "OCR내용": [result['combined_ocr_summaries']],
                     "특이사항": [result['special_note']],
-                    "Product Summary": [self.generate_product_summary(result['product_info'], result['combined_ocr_summaries'])],
                     "LastModifiedTime": [current_time]
                 })
                 self.df = pd.concat([self.df, new_entry], ignore_index=True)
