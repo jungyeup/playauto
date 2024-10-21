@@ -59,17 +59,22 @@ class QuestionHandler:
             ])
             df.to_excel(file_path, index=False)
 
-    def fetch_batch_orders(self, master_code=None, prod_code=None, tel=None):
+    def fetch_batch_orders(self, order_code=None, master_code=None, prod_code=None, tel=None):
         base_url = 'http://playauto-api.playauto.co.kr/emp/v1/orders/'
         headers = {'X-API-KEY': API_KEY}
         params = {}
-        if master_code:
-            params['MasterCode'] = master_code
-        if prod_code:
-            params['ProdCode'] = prod_code
-        if tel:
-            params['tel'] = tel
 
+        # Prioritize using OrderCode if available
+        if order_code:
+            params['OrderCode'] = order_code
+        else:
+            # Fallback to using the other parameters
+            if master_code:
+                params['MasterCode'] = master_code
+            if prod_code:
+                params['ProdCode'] = prod_code
+            if tel:
+                params['tel'] = tel
         try:
             logger.debug(f"Fetching orders with params: {params}")
             response = requests.get(base_url, headers=headers, params=params)
@@ -151,7 +156,6 @@ class QuestionHandler:
                         current_answer = matching_rows.iloc[0]['답변내용']
                         
                         if current_answer == acontent:
-                            logger.info(f"No update needed for question: {combined_question} as the answer is unchanged.")
                             continue
                         
                         logger.info(f"Updating answer for question: {combined_question}")
@@ -277,12 +281,12 @@ class QuestionHandler:
         qna_id = inquiry.get('Number')
         qsubject = inquiry.get('QSubject', '')
         qcontent = inquiry.get('QContent', '')
-
         master_code = inquiry.get('MasterCode')
         prod_code = inquiry.get('ProdCode')
         tel = inquiry.get('QTel') or inquiry.get('QHtel')
-        
-        orders_data = self.fetch_batch_orders(master_code, prod_code, tel)
+        order_code = inquiry.get('OrderCode')  # Fetch the OrderCode if available
+
+        orders_data = self.fetch_batch_orders(order_code, master_code, prod_code, tel)
 
         if isinstance(orders_data, list):
             order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
@@ -317,9 +321,17 @@ class QuestionHandler:
             force_ocr = self.should_run_ocr(existing_entries)
 
             if not existing_entries.empty and not force_ocr:
-                latest_ocr_entry = existing_entries.iloc[existing_entries['LastModifiedTime'].idxmax()]
-                combined_summaries = latest_ocr_entry['OCR내용']
-                logger.info(f"Using existing OCR content for product: {product_name}")
+                try:
+                    if 'LastModifiedTime' in existing_entries and not existing_entries['LastModifiedTime'].isnull().all():
+                        latest_ocr_entry = existing_entries.loc[existing_entries['LastModifiedTime'].idxmax()]
+                        combined_summaries = latest_ocr_entry['OCR내용']
+                        logger.info(f"Using existing OCR content for product: {product_name}")
+                    else:
+                        combined_summaries = "OCR을 통한 유효한 데이터를 찾을 수 없습니다."
+                        logger.info(f"No valid 'LastModifiedTime' found for product: {product_name}")
+                except IndexError:
+                    logger.error("Failed to obtain latest OCR entry due to index error.")
+                    combined_summaries = "OCR 내용을 가져오는 중 오류가 발생했습니다."
             else:
                 logger.info(f"No recent OCR content found for product: {product_name} or forcing OCR...")
                 html_content = inquiry.get('HTMLContent', '')
@@ -343,11 +355,12 @@ class QuestionHandler:
                 order_states=order_state_summary,
                 image_urls=all_image_urls
             )
+
             self.results_to_process.append({
                 "qna_id": qna_id,
                 "question": question,
-                "draft_answer": answer,
-                "answer": "",
+                "draft_answer": answer,  # Store the draft answer.
+                "answer": "",  # Leave the formal answer empty initially.
                 "original_answer": answer,
                 "modification_note": "자동 생성된 답변",
                 "special_note": "답변 생성됨",
@@ -493,42 +506,3 @@ def main_menu():
 
 if __name__ == "__main__":
     main_menu()
-
-
-
-# Uncomment these lines for interactive user input
-# while True:
-#     print(f"\n\n====================================================================================================")
-#     print(f"상품명: {result['product_name']}\n\n질문:\n{result['question']}\n\n생성된 답변:\n{result['draft_answer']}\n")
-#     user_input = input("답변을 수정하거나 추가하십시오. 업로드를 취소하려면 '취소','ㅊ' 혹은 'c'를 입력하고, 재생성을 원하시면 '재생성','ㄱㄷ' 혹은 're', 그대로 업로드 하실려면 Enter를 누르세요: ").strip().lower()
-
-#     if user_input in ['c', '취소', 'ㅊ']:
-#         print("업로드가 취소되었습니다.")
-#         result['status'] = "Canceled"
-#         result['special_note'] = "답변 업로드 취소됨"
-#         break
-
-#     if user_input in ['re', '재생성', 'ㄱㄷ']:
-#         result['draft_answer'] = self.generate_answer(
-#             question=result['question'],
-#             summaries=[self.ocr_handler.summarize_summaries(result['combined_ocr_summaries'])],
-#             product_info=result['product_info'],
-#             inquiry_data=result['inquiry'],
-#             product_name=result['product_name'],
-#             comment_time=result['write_date'],
-#             order_states=result.get('order_state_summary'),
-#             image_urls=result.get('image_urls')
-#         )
-#         result['original_answer'] = result['draft_answer']
-#         result['modification_note'] = "자동 생성된 답변 (재생성)"
-#         result['status'] = "Regenerated"
-#         result['special_note'] = "답변 재생성됨"
-#     elif user_input:
-#         result['answer'] = self.answer_generator.revise_answer(user_input, result['original_answer'])
-#         result['modification_note'] = f"수정된 답변: {user_input}"
-#         result['status'] = "Modified"
-#         result['special_note'] = "답변 수정됨"
-#     else:
-#         result['answer'] = result['draft_answer']
-#         success = True
-#         break
