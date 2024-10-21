@@ -1,23 +1,33 @@
-# AnswerGenerator.py
 import logging
-from openai import OpenAI
-import pandas as pd
 import os
 import faiss
-from sentence_transformers import SentenceTransformer
+import numpy as np
 import threading
 import ctypes
 import time
 import requests
+import pandas as pd
+from openai import OpenAI
+from sentence_transformers import SentenceTransformer
+from mysql.connector import connect, Error
+from dotenv import load_dotenv
 from ocr_handler import OCRHandler
-import numpy as np  # Required for embedding management
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+load_dotenv()
+
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME')
+}
+
 class AnswerGenerator:
-    def __init__(self, openai_api_key, data_folder='data'):
+    def __init__(self, openai_api_key):
         self.client = OpenAI(api_key=openai_api_key)
         self.system_prompt = """
             당신은 쇼핑몰 고객 문의에 응답하는 친절한 상담원입니다. 한국어 문법을 정확히 지키고, 띄어쓰기도 정확하게 합니다.
@@ -108,16 +118,19 @@ class AnswerGenerator:
         self.model = SentenceTransformer('sentence-transformers/xlm-r-large-en-ko-nli-ststb')
         self.ocr_handler = OCRHandler()
 
-        # Load data and prepare embeddings
-        self.df = self.load_all_excel_files(data_folder)
+        # Establish a connection to the MySQL database
+        self.connection = self.create_db_connection()
+
+        # Load data that will be used for embeddings
+        self.df = self.load_from_db()
         if '문의내용' not in self.df.columns or '답변내용' not in self.df.columns:
-            raise ValueError("Excel file must contain '문의내용' and '답변내용' columns.")
+            raise ValueError("Database must contain '문의내용' and '답변내용' columns.")
 
         self.df['문의내용'] = self.df['문의내용'].fillna('').astype(str)
         self.embeddings = self.generate_embeddings(self.df['문의내용'])
 
         # Create and manage FAISS index
-        index_file_path = os.path.join(data_folder, 'faiss.index')
+        index_file_path = os.path.join('data', 'faiss.index')
         if os.path.exists(index_file_path):
             self.index = faiss.read_index(index_file_path)
             logger.info("Loaded FAISS index from disk.")
@@ -126,19 +139,27 @@ class AnswerGenerator:
             faiss.write_index(self.index, index_file_path)
             logger.info("FAISS index created and saved to disk.")
 
-    def load_all_excel_files(self, folder_path):
-        combined_df = pd.DataFrame()
+    def create_db_connection(self):
+        """Establish and return a connection to the MySQL database."""
         try:
-            for file_name in os.listdir(folder_path):
-                if file_name.endswith('.xls') or file_name.endswith('.xlsx'):
-                    file_path = os.path.join(folder_path, file_name)
-                    read_engine = 'xlrd' if file_name.endswith('.xls') else 'openpyxl'
-                    df = pd.read_excel(file_path, engine=read_engine)
-                    combined_df = pd.concat([combined_df, df], ignore_index=True)
-            return combined_df
-        except Exception as e:
-            logger.error(f"Error reading Excel files: {e}")
-            raise
+            connection = connect(**DB_CONFIG)
+            if connection.is_connected():
+                logger.info("Connected to the MySQL database.")
+            return connection
+        except Error as e:
+            logger.error(f"Error connecting to MySQL: {e}")
+            return None
+
+    def load_from_db(self):
+        """Load question and answer data from the MySQL database."""
+        query = "SELECT 문의내용, 답변내용 FROM inquiries"
+        try:
+            df = pd.read_sql(query, self.connection)
+            logger.info("Loaded data from MySQL database.")
+            return df
+        except Error as e:
+            logger.error(f"Error reading from MySQL: {e}")
+            return pd.DataFrame()  # Return an empty DataFrame on error
 
     def generate_embeddings(self, texts):
         logger.info("Generating embeddings...")
@@ -391,7 +412,7 @@ class AnswerGenerator:
             - 사용법/호환성
             - 계산서 관련
             - 반품
-            - 교한
+            - 교환
 
             고객 문의: {question}
             """

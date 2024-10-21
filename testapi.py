@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 import ctypes
 import threading
 import warnings
+import mysql.connector
+from mysql.connector import Error
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
 # Suppress warnings from BeautifulSoup
@@ -26,6 +28,14 @@ INQUIRY_LIST_URL = f'{BASE_URL}/v1/qnas/'
 ANSWER_URL = f'{BASE_URL}/v1/qnas/'
 PRODUCT_URL_TEMPLATE = f'{BASE_URL}/v1/prods/{{}}'
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+# Database configuration
+DB_CONFIG = {
+    'host': os.getenv('DB_HOST'),
+    'user': os.getenv('DB_USER'),
+    'password': os.getenv('DB_PASSWORD'),
+    'database': os.getenv('DB_NAME')
+}
 
 answer_generator = AnswerGenerator(openai_api_key=OPENAI_API_KEY)
 ocr_handler = OCRHandler()
@@ -49,6 +59,20 @@ class QuestionHandler:
             self.existing_data = pd.DataFrame()
         self.results_to_process = []
 
+        # Initialize database connection
+        self.connection = self.create_db_connection()
+
+    def create_db_connection(self):
+        """Establish a connection to the MySQL database."""
+        try:
+            connection = mysql.connector.connect(**DB_CONFIG)
+            if connection.is_connected():
+                logger.info("Database connection established successfully.")
+            return connection
+        except Error as e:
+            logger.error(f"Error connecting to MySQL: {e}")
+            return None
+
     def init_excel_file(self, file_path):
         if not os.path.exists(file_path):
             df = pd.DataFrame(columns=[
@@ -59,16 +83,54 @@ class QuestionHandler:
             ])
             df.to_excel(file_path, index=False)
 
+    def save_to_excel_and_db(self, new_data: pd.DataFrame):
+        """Save the data to both Excel and MySQL database."""
+        self.save_to_excel(new_data)
+        self.save_to_db(new_data)
+
+    def save_to_excel(self, new_data: pd.DataFrame):
+        if os.path.exists(self.excel_file_path):
+            df_existing = pd.read_excel(self.excel_file_path)
+            combined_df = pd.concat([df_existing, new_data], ignore_index=True)
+        else:
+            combined_df = new_data
+
+        combined_df.to_excel(self.excel_file_path, index=False)
+        logger.info(f"Saved questions and answers to {self.excel_file_path}")
+
+    def save_to_db(self, new_data: pd.DataFrame):
+        """Insert the data from the DataFrame into the MySQL database."""
+        if not self.connection:
+            logger.error("No database connection available for saving data.")
+            return
+
+        cursor = self.connection.cursor()
+        query = """
+        INSERT INTO inquiries (
+            작성시간, 상품명, 모델명, 문의내용, 
+            답변초안, 답변내용, 수정내용, OCR내용, 
+            특이사항, LastModifiedTime
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        for _, row in new_data.iterrows():
+            try:
+                cursor.execute(query, tuple(row))
+                logger.info("Row inserted into database successfully.")
+            except Error as e:
+                logger.error(f"Failed to insert row into MySQL: {e}")
+
+        self.connection.commit()
+        cursor.close()
+
     def fetch_batch_orders(self, order_code=None, master_code=None, prod_code=None, tel=None):
         base_url = 'http://playauto-api.playauto.co.kr/emp/v1/orders/'
         headers = {'X-API-KEY': API_KEY}
         params = {}
 
-        # Prioritize using OrderCode if available
         if order_code:
             params['OrderCode'] = order_code
         else:
-            # Fallback to using the other parameters
             if master_code:
                 params['MasterCode'] = master_code
             if prod_code:
@@ -170,7 +232,7 @@ class QuestionHandler:
         except Exception as e:
             logger.error(f"An error occurred: {e}")
 
-    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str: 
+    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str:
         validated_summaries = [{'summary': s} for s in summaries]
         try:
             return self.answer_generator.generate_answer(
@@ -432,7 +494,7 @@ class QuestionHandler:
     def process_user_inputs(self):
         for result in self.results_to_process:
             success = False
-            
+
             # Automatically upload the answer without user input
             result['answer'] = result['draft_answer']
             success = True
@@ -452,22 +514,11 @@ class QuestionHandler:
                     "특이사항": [result['special_note']],
                     "LastModifiedTime": [current_time]
                 })
-            
+
                 self.df = pd.concat([self.df, new_entry], ignore_index=True)
-                
-                self.save_to_excel(new_entry)
+                self.save_to_excel_and_db(new_entry)
 
         self.results_to_process.clear()
-        
-    def save_to_excel(self, new_data: pd.DataFrame):
-        if os.path.exists(self.excel_file_path):
-            df_existing = pd.read_excel(self.excel_file_path)
-            combined_df = pd.concat([df_existing, new_data], ignore_index=True)
-        else:
-            combined_df = new_data
-
-        combined_df.to_excel(self.excel_file_path, index=False)
-        logger.info(f"Saved questions and answers to {self.excel_file_path}")
 
 def main_menu():
     handler = QuestionHandler()
@@ -477,7 +528,7 @@ def main_menu():
         print("1. 신규문의 답변생성 (Generate answers for new inquiries)")
         print("2. 상품 정보수집 (Collect product information)")
         print("3. 종료 (Exit)")
-        
+
         choice = input("Enter your choice: ").strip()
 
         if choice == '1':
