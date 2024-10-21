@@ -10,6 +10,7 @@ import ctypes
 import time
 import requests
 from ocr_handler import OCRHandler
+import numpy as np  # Required for embedding management
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -114,7 +115,16 @@ class AnswerGenerator:
 
         self.df['문의내용'] = self.df['문의내용'].fillna('').astype(str)
         self.embeddings = self.generate_embeddings(self.df['문의내용'])
-        self.index = self.create_faiss_index(self.embeddings)
+
+        # Create and manage FAISS index
+        index_file_path = os.path.join(data_folder, 'faiss.index')
+        if os.path.exists(index_file_path):
+            self.index = faiss.read_index(index_file_path)
+            logger.info("Loaded FAISS index from disk.")
+        else:
+            self.index = self.create_faiss_index(self.embeddings)
+            faiss.write_index(self.index, index_file_path)
+            logger.info("FAISS index created and saved to disk.")
 
     def load_all_excel_files(self, folder_path):
         combined_df = pd.DataFrame()
@@ -132,17 +142,18 @@ class AnswerGenerator:
 
     def generate_embeddings(self, texts):
         logger.info("Generating embeddings...")
-        return self.model.encode(texts)
+        texts = [text for text in texts if text]  # Filter out any empty texts
+        return self.model.encode(texts, batch_size=32, show_progress_bar=True)
 
     def create_faiss_index(self, embeddings):
         if embeddings.shape[0] == 0:
             logger.error("No embeddings provided to create index")
             raise ValueError("No embeddings to index.")
         index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(embeddings)
+        index.add(np.array(embeddings, dtype='float32'))
         logger.info("FAISS index created.")
         return index
-    
+
     def show_popup_non_blocking(self, message):
         def popup(message):
             message_box_styles = 0x00000040 | 0x00000000 | 0x00040000 | 0x00001000
@@ -152,7 +163,7 @@ class AnswerGenerator:
     def find_similar_questions(self, question):
         logger.info("Finding similar questions based on '문의내용'...")
         try:
-            question_embedding = self.model.encode([question])
+            question_embedding = np.array([self.model.encode(question)])
             distances, indices = self.index.search(question_embedding, 10)
 
             if indices.size == 0 or not len(indices[0]):
@@ -164,12 +175,7 @@ class AnswerGenerator:
                 if 0 <= idx < len(self.df):
                     entry = self.df.iloc[idx]
                     similarity_score = 100 - distances[0][indices[0].tolist().index(idx)]
-                    if similarity_score > 50:
-                        importance = 'High, 유사질문에 대한 모범답안 입니다. 답변을 참고하지만 수치와 숫자는 참고하지 말고 답변 방식과 형식을 참고하십시오.'
-                    elif similarity_score > 0:
-                        importance = 'Medium, 유사질문에 대한 답변입니다. 답변을 참고하지만 수치와 숫자는 참고하지 말고 답변 형식만을 참고하십시오'
-                    else:
-                        importance = 'Low, 틀린 답변입니다. 답변의 수치와 숫자는 참고하지 말고 형식만을 참고하십시오.'
+                    importance = self.determine_importance(similarity_score)
 
                     similar_questions.append({
                         'entry': entry,
@@ -177,10 +183,17 @@ class AnswerGenerator:
                         'importance': importance
                     })
             return similar_questions
-            
         except Exception as e:
             logger.error(f"Error in finding similar questions: {e}")
             return []
+
+    def determine_importance(self, similarity_score):
+        if similarity_score > 50:
+            return 'High, 유사질문에 대한 모범답안 입니다. 답변을 참고하지만 수치와 숫자는 참고하지 말고 답변 방식과 형식을 참고하십시오.'
+        elif similarity_score > 0:
+            return 'Medium, 유사질문에 대한 답변입니다. 답변을 참고하지만 수치와 숫자는 참고하지 말고 답변 형식만을 참고하십시오'
+        else:
+            return 'Low, 틀린 답변입니다. 답변의 수치와 숫자는 참고하지 말고 형식만을 참고하십시오.'
 
     def check_stock(self, master_code):
         if not master_code:
