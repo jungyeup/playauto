@@ -189,11 +189,11 @@ class QuestionHandler:
         try:
             headers = {'X-API-KEY': API_KEY}
             params = {'states': '전송완료', 'page': 1, 'count': 100}
-            
+
             response = requests.get(INQUIRY_LIST_URL, headers=headers, params=params)
             response.raise_for_status()
             inquiries = response.json()
-            
+
             if not isinstance(inquiries, list):
                 logger.error("Expected response to be a list.")
                 return
@@ -203,6 +203,12 @@ class QuestionHandler:
                 return
 
             df = pd.read_excel('data/questions_answers.xlsx')
+
+            if not self.connection:
+                logger.error("No database connection available for updating data.")
+                return
+            
+            cursor = self.connection.cursor()
 
             for inquiry in inquiries:
                 if isinstance(inquiry, dict):
@@ -219,10 +225,27 @@ class QuestionHandler:
                         
                         if current_answer == acontent:
                             continue
-                        
+
                         logger.info(f"Updating answer for question: {combined_question}")
 
+                        # Update in Excel
                         df.loc[matching_rows.index, '답변내용'] = acontent
+
+                        # Formatted for SQL Update
+                        query = """
+                        UPDATE inquiries
+                        SET 답변내용 = %s
+                        WHERE 문의내용 = %s
+                        """
+                        try:
+                            # Update in the database
+                            cursor.execute(query, (acontent, combined_question))
+                            logger.info("Database row updated successfully.")
+                        except Error as e:
+                            logger.error(f"Failed to update row in MySQL: {e}")
+
+            self.connection.commit()
+            cursor.close()
 
             df.to_excel('data/questions_answers.xlsx', index=False)
             logger.info("Excel file updated successfully.")
