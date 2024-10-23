@@ -11,8 +11,6 @@ from dotenv import load_dotenv
 import ctypes
 import threading
 import warnings
-import mysql.connector
-from mysql.connector import Error
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning
 
 # Suppress warnings from BeautifulSoup
@@ -28,14 +26,6 @@ INQUIRY_LIST_URL = f'{BASE_URL}/v1/qnas/'
 ANSWER_URL = f'{BASE_URL}/v1/qnas/'
 PRODUCT_URL_TEMPLATE = f'{BASE_URL}/v1/prods/{{}}'
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-
-# Database configuration
-DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'database': os.getenv('DB_NAME')
-}
 
 answer_generator = AnswerGenerator(openai_api_key=OPENAI_API_KEY)
 ocr_handler = OCRHandler()
@@ -59,20 +49,6 @@ class QuestionHandler:
             self.existing_data = pd.DataFrame()
         self.results_to_process = []
 
-        # Initialize database connection
-        self.connection = self.create_db_connection()
-
-    def create_db_connection(self):
-        """Establish a connection to the MySQL database."""
-        try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            if connection.is_connected():
-                logger.info("Database connection established successfully.")
-            return connection
-        except Error as e:
-            logger.error(f"Error connecting to MySQL: {e}")
-            return None
-
     def init_excel_file(self, file_path):
         if not os.path.exists(file_path):
             df = pd.DataFrame(columns=[
@@ -83,60 +59,20 @@ class QuestionHandler:
             ])
             df.to_excel(file_path, index=False)
 
-    def save_to_excel_and_db(self, new_data: pd.DataFrame):
-        """Save the data to both Excel and MySQL database."""
-        self.save_to_excel(new_data)
-        self.save_to_db(new_data)
-
-    def save_to_excel(self, new_data: pd.DataFrame):
-        if os.path.exists(self.excel_file_path):
-            df_existing = pd.read_excel(self.excel_file_path)
-            combined_df = pd.concat([df_existing, new_data], ignore_index=True)
-        else:
-            combined_df = new_data
-
-        combined_df.to_excel(self.excel_file_path, index=False)
-        logger.info(f"Saved questions and answers to {self.excel_file_path}")
-
-    def save_to_db(self, new_data: pd.DataFrame):
-        """Insert the data from the DataFrame into the MySQL database."""
-        if not self.connection:
-            logger.error("No database connection available for saving data.")
-            return
-
-        cursor = self.connection.cursor()
-        query = """
-        INSERT INTO inquiries (
-            작성시간, 상품명, 모델명, 문의내용, 
-            답변초안, 답변내용, 수정내용, OCR내용, 
-            특이사항, LastModifiedTime
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
-        for _, row in new_data.iterrows():
-            try:
-                cursor.execute(query, tuple(row))
-                logger.info("Row inserted into database successfully.")
-            except Error as e:
-                logger.error(f"Failed to insert row into MySQL: {e}")
-
-        self.connection.commit()
-        cursor.close()
-
-    def fetch_batch_orders(self, order_code=None, master_code=None, prod_code=None, tel=None):
+    def fetch_batch_orders(self, order_code=None, master_code=None, tel=None):
         base_url = 'http://playauto-api.playauto.co.kr/emp/v1/orders/'
         headers = {'X-API-KEY': API_KEY}
         params = {}
 
+        # Prioritize using OrderCode if available
         if order_code:
             params['OrderCode'] = order_code
         else:
-            if master_code:
-                params['MasterCode'] = master_code
-            if prod_code:
-                params['ProdCode'] = prod_code
-            if tel:
+            if tel and master_code:
+                # Case where both tel and master_code are present
                 params['tel'] = tel
+                params['MasterCode'] = master_code
+
         try:
             logger.debug(f"Fetching orders with params: {params}")
             response = requests.get(base_url, headers=headers, params=params)
@@ -181,34 +117,32 @@ class QuestionHandler:
             if last_modified_time:
                 last_modified_time = pd.to_datetime(last_modified_time)
                 current_time = pd.Timestamp.now()
-                if (current_time - last_modified_time).days >= 30:
+                if (current_time - last_modified_time).days >= 365:
                     return True
         return False
     
     def update_answers_from_api(self):
         try:
-            headers = {'X-API-KEY': API_KEY}
-            params = {'states': '전송완료', 'page': 1, 'count': 100}
+            inquiries = []
+            for state in ['전송완료', '답변완료']:
+                headers = {'X-API-KEY': API_KEY}
+                params = {'states': state, 'page': 1, 'count': 100}
+                
+                response = requests.get(INQUIRY_LIST_URL, headers=headers, params=params)
+                response.raise_for_status()
+                state_inquiries = response.json()
 
-            response = requests.get(INQUIRY_LIST_URL, headers=headers, params=params)
-            response.raise_for_status()
-            inquiries = response.json()
+                if not isinstance(state_inquiries, list):
+                    logger.error(f"Expected response to be a list for state: {state}")
+                    return
 
-            if not isinstance(inquiries, list):
-                logger.error("Expected response to be a list.")
-                return
-
+                inquiries.extend(state_inquiries)
+            
             if not os.path.exists('data/questions_answers.xlsx'):
                 logger.error("Excel file not found.")
                 return
 
             df = pd.read_excel('data/questions_answers.xlsx')
-
-            if not self.connection:
-                logger.error("No database connection available for updating data.")
-                return
-            
-            cursor = self.connection.cursor()
 
             for inquiry in inquiries:
                 if isinstance(inquiry, dict):
@@ -225,27 +159,10 @@ class QuestionHandler:
                         
                         if current_answer == acontent:
                             continue
-
+                        
                         logger.info(f"Updating answer for question: {combined_question}")
 
-                        # Update in Excel
                         df.loc[matching_rows.index, '답변내용'] = acontent
-
-                        # Formatted for SQL Update
-                        query = """
-                        UPDATE inquiries
-                        SET 답변내용 = %s
-                        WHERE 문의내용 = %s
-                        """
-                        try:
-                            # Update in the database
-                            cursor.execute(query, (acontent, combined_question))
-                            logger.info("Database row updated successfully.")
-                        except Error as e:
-                            logger.error(f"Failed to update row in MySQL: {e}")
-
-            self.connection.commit()
-            cursor.close()
 
             df.to_excel('data/questions_answers.xlsx', index=False)
             logger.info("Excel file updated successfully.")
@@ -255,7 +172,7 @@ class QuestionHandler:
         except Exception as e:
             logger.error(f"An error occurred: {e}")
 
-    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str:
+    def generate_answer(self, question: str, summaries: List[str], product_info: Dict[str, Any], inquiry_data: Dict[str, Any], product_name: str = None, comment_time: str = None, order_states: str = None, image_urls: List[str] = None) -> str: 
         validated_summaries = [{'summary': s} for s in summaries]
         try:
             return self.answer_generator.generate_answer(
@@ -285,7 +202,6 @@ class QuestionHandler:
                 'AContent': answer
             }]
         }
-
         try:
             response = requests.patch(ANSWER_URL, headers=headers, json=data)
             response.raise_for_status()
@@ -371,7 +287,7 @@ class QuestionHandler:
         tel = inquiry.get('QTel') or inquiry.get('QHtel')
         order_code = inquiry.get('OrderCode')  # Fetch the OrderCode if available
 
-        orders_data = self.fetch_batch_orders(order_code, master_code, prod_code, tel)
+        orders_data = self.fetch_batch_orders(order_code, master_code, tel)
 
         if isinstance(orders_data, list):
             order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
@@ -379,6 +295,7 @@ class QuestionHandler:
         else:
             order_state_summary = 'No Orders Found'
 
+        # Combine qsubject and qcontent_text
         question_parts = [qsubject, qcontent]
         question = ". ".join(part for part in question_parts if part).strip()
 
@@ -401,7 +318,11 @@ class QuestionHandler:
             return
 
         try:
-            existing_entries = self.existing_data[self.existing_data['상품명'] == product_name]
+            # Adjust to check for both product_name and master_code
+            existing_entries_by_name = self.existing_data[self.existing_data['상품명'] == product_name]
+            existing_entries_by_code = self.existing_data[self.existing_data['모델명'] == master_code]
+
+            existing_entries = pd.concat([existing_entries_by_name, existing_entries_by_code]).drop_duplicates()
 
             force_ocr = self.should_run_ocr(existing_entries)
 
@@ -410,15 +331,15 @@ class QuestionHandler:
                     if 'LastModifiedTime' in existing_entries and not existing_entries['LastModifiedTime'].isnull().all():
                         latest_ocr_entry = existing_entries.loc[existing_entries['LastModifiedTime'].idxmax()]
                         combined_summaries = latest_ocr_entry['OCR내용']
-                        logger.info(f"Using existing OCR content for product: {product_name}")
+                        logger.info(f"Using existing OCR content for product: {product_name} or model {master_code}")
                     else:
                         combined_summaries = "OCR을 통한 유효한 데이터를 찾을 수 없습니다."
-                        logger.info(f"No valid 'LastModifiedTime' found for product: {product_name}")
+                        logger.info(f"No valid 'LastModifiedTime' found for product: {product_name} or model {master_code}")
                 except IndexError:
                     logger.error("Failed to obtain latest OCR entry due to index error.")
                     combined_summaries = "OCR 내용을 가져오는 중 오류가 발생했습니다."
             else:
-                logger.info(f"No recent OCR content found for product: {product_name} or forcing OCR...")
+                logger.info(f"No recent OCR content found for product: {product_name} or model {master_code}, or forcing OCR...")
                 html_content = inquiry.get('HTMLContent', '')
                 html_ocr_summaries = self.ocr_handler.ocr_from_html_content(html_content)
                 image_ocr_summaries = self.ocr_handler.ocr_from_image_urls(all_image_urls)
@@ -517,7 +438,7 @@ class QuestionHandler:
     def process_user_inputs(self):
         for result in self.results_to_process:
             success = False
-
+            
             # Automatically upload the answer without user input
             result['answer'] = result['draft_answer']
             success = True
@@ -537,11 +458,22 @@ class QuestionHandler:
                     "특이사항": [result['special_note']],
                     "LastModifiedTime": [current_time]
                 })
-
+            
                 self.df = pd.concat([self.df, new_entry], ignore_index=True)
-                self.save_to_excel_and_db(new_entry)
+                
+                self.save_to_excel(new_entry)
 
         self.results_to_process.clear()
+        
+    def save_to_excel(self, new_data: pd.DataFrame):
+        if os.path.exists(self.excel_file_path):
+            df_existing = pd.read_excel(self.excel_file_path)
+            combined_df = pd.concat([df_existing, new_data], ignore_index=True)
+        else:
+            combined_df = new_data
+
+        combined_df.to_excel(self.excel_file_path, index=False)
+        logger.info(f"Saved questions and answers to {self.excel_file_path}")
 
 def main_menu():
     handler = QuestionHandler()
@@ -551,7 +483,7 @@ def main_menu():
         print("1. 신규문의 답변생성 (Generate answers for new inquiries)")
         print("2. 상품 정보수집 (Collect product information)")
         print("3. 종료 (Exit)")
-
+        
         choice = input("Enter your choice: ").strip()
 
         if choice == '1':
