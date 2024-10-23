@@ -59,7 +59,7 @@ class QuestionHandler:
             ])
             df.to_excel(file_path, index=False)
 
-    def fetch_batch_orders(self, order_code=None, master_code=None, tel=None):
+    def fetch_batch_orders(self, order_code=None, master_code=None, prod_code=None):
         base_url = 'http://playauto-api.playauto.co.kr/emp/v1/orders/'
         headers = {'X-API-KEY': API_KEY}
         params = {}
@@ -68,20 +68,25 @@ class QuestionHandler:
         if order_code:
             params['OrderCode'] = order_code
         else:
-            if tel and master_code:
-                # Case where both tel and master_code are present
-                params['tel'] = tel
+            if master_code and prod_code:
                 params['MasterCode'] = master_code
+                params['ProdCode'] = prod_code
 
-        try:
-            logger.debug(f"Fetching orders with params: {params}")
-            response = requests.get(base_url, headers=headers, params=params)
-            response.raise_for_status()
-            orders_data = response.json()
-            logger.info(f"Fetched orders successfully: {orders_data}")
-            return orders_data
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to fetch orders: {e}")
+        # Make API request only if params are not empty
+        if params:
+            try:
+                logger.debug(f"Fetching orders with params: {params}")
+                response = requests.get(base_url, headers=headers, params=params)
+                response.raise_for_status()
+                orders_data = response.json()
+                logger.info(f"Fetched orders successfully: {orders_data}")
+                print(params)  # Debug output to show parameters being used
+                return orders_data
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to fetch orders: {e}")
+                return []
+        else:
+            logger.info("No parameters provided; skipping API request.")
             return []
 
     def fetch_inquiries(self) -> List[Dict[str, Any]]:
@@ -103,7 +108,7 @@ class QuestionHandler:
                 if not isinstance(item, dict):
                     logger.error("Non-dictionary item found in response_data.")
                     return []
-
+            print(response_data)
             return response_data
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch inquiries: {e}")
@@ -195,7 +200,7 @@ class QuestionHandler:
             'Content-Type': 'application/json'
         }
         data = {
-            'overWrite': False,
+            'overWrite': True,
             'data': [{
                 'number': str(qna_id),
                 'Asubject': "문의 답변 드립니다.",
@@ -279,21 +284,32 @@ class QuestionHandler:
             logger.error(f"Invalid inquiry format, expected dict but got: {type(inquiry)}")
             return
 
-        qna_id = inquiry.get('Number')
-        qsubject = inquiry.get('QSubject', '')
-        qcontent = inquiry.get('QContent', '')
-        master_code = inquiry.get('MasterCode')
-        prod_code = inquiry.get('ProdCode')
-        tel = inquiry.get('QTel') or inquiry.get('QHtel')
-        order_code = inquiry.get('OrderCode')  # Fetch the OrderCode if available
+        qna_id = inquiry.get('Number')  # Correctly extract 'Number'
+        qsubject = inquiry.get('QSubject', '')  # Assuming QSubject should be included
+        qcontent = inquiry.get('QContent', '')  # Assuming QContent should be included
+        master_code = inquiry.get('MasterCode')  # Correctly extract 'MasterCode'
+        prod_code = inquiry.get('ProdCode')  # Correctly extract 'ProdCode'
 
-        orders_data = self.fetch_batch_orders(order_code, master_code, tel)
+        # Adjusted to check for valid tel fields, perhaps OrderTel or OrderHtel
+        tel = inquiry.get('QTel') or inquiry.get('QHtel')
+        qname = inquiry.get('QName')  # Extract QName for comparison
+
+        order_code = inquiry.get('OrderCode')  # Fetch the OrderCode if available
+        print(order_code, master_code, tel)
+
+        # Fetch orders data using the provided or extracted information
+        orders_data = self.fetch_batch_orders(order_code, master_code, prod_code)
+
+        order_state_summary = 'No Orders Found'  # Default if no matching order state is found
 
         if isinstance(orders_data, list):
-            order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
-            order_state_summary = ", ".join(order_states)
-        else:
-            order_state_summary = 'No Orders Found'
+            for order in orders_data:
+                order_name = order.get('OrderName')
+                
+                if order_name == qname:  # Check if OrderName matches QName
+                    order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
+                    order_state_summary = ", ".join(order_states)
+                    break
 
         # Combine qsubject and qcontent_text
         question_parts = [qsubject, qcontent]
@@ -303,7 +319,7 @@ class QuestionHandler:
         qtype = inquiry.get('QType')
 
         product_info, all_image_urls = {}, []
-        product_name = inquiry.get('ProductName', 'Unknown Product')
+        product_name = inquiry.get('ProdName', 'Unknown Product')
 
         if master_code:
             product_info, all_image_urls = self.fetch_product_info(master_code)
