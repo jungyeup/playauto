@@ -200,7 +200,7 @@ class QuestionHandler:
             'Content-Type': 'application/json'
         }
         data = {
-            'overWrite': True,
+            'overWrite': False,
             'data': [{
                 'number': str(qna_id),
                 'Asubject': "문의 답변 드립니다.",
@@ -284,34 +284,35 @@ class QuestionHandler:
             logger.error(f"Invalid inquiry format, expected dict but got: {type(inquiry)}")
             return
 
-        qna_id = inquiry.get('Number')  # Correctly extract 'Number'
-        qsubject = inquiry.get('QSubject', '')  # Assuming QSubject should be included
-        qcontent = inquiry.get('QContent', '')  # Assuming QContent should be included
-        master_code = inquiry.get('MasterCode')  # Correctly extract 'MasterCode'
-        prod_code = inquiry.get('ProdCode')  # Correctly extract 'ProdCode'
-
-        # Adjusted to check for valid tel fields, perhaps OrderTel or OrderHtel
+        qna_id = inquiry.get('Number')
+        qsubject = inquiry.get('QSubject', '')
+        qcontent = inquiry.get('QContent', '')
+        master_code = inquiry.get('MasterCode')
+        prod_code = inquiry.get('ProdCode')
         tel = inquiry.get('QTel') or inquiry.get('QHtel')
-        qname = inquiry.get('QName')  # Extract QName for comparison
+        qname = inquiry.get('QName')
 
-        order_code = inquiry.get('OrderCode')  # Fetch the OrderCode if available
-        print(order_code, master_code, tel)
+        # Use order code if available
+        order_code = inquiry.get('OrderCode')
 
-        # Fetch orders data using the provided or extracted information
+        # Fetch orders using the first available parameters
         orders_data = self.fetch_batch_orders(order_code, master_code, prod_code)
 
-        order_state_summary = 'No Orders Found'  # Default if no matching order state is found
-
+        order_state_summary = 'No Orders Found'
         if isinstance(orders_data, list):
-            for order in orders_data:
-                order_name = order.get('OrderName')
-                
-                if order_name == qname:  # Check if OrderName matches QName
-                    order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
-                    order_state_summary = ", ".join(order_states)
-                    break
+            if order_code:
+                # Prioritize the order info based on OrderCode
+                order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
+                order_state_summary = ", ".join(order_states)
+            else:
+                # Fallback to checking name match
+                for order in orders_data:
+                    order_name = order.get('OrderName')
+                    if order_name == qname:
+                        order_states = [order.get('OrderState', 'Unknown State') for order in orders_data if isinstance(order, dict)]
+                        order_state_summary = ", ".join(order_states)
+                        break
 
-        # Combine qsubject and qcontent_text
         question_parts = [qsubject, qcontent]
         question = ". ".join(part for part in question_parts if part).strip()
 
@@ -334,10 +335,8 @@ class QuestionHandler:
             return
 
         try:
-            # Adjust to check for both product_name and master_code
             existing_entries_by_name = self.existing_data[self.existing_data['상품명'] == product_name]
             existing_entries_by_code = self.existing_data[self.existing_data['모델명'] == master_code]
-
             existing_entries = pd.concat([existing_entries_by_name, existing_entries_by_code]).drop_duplicates()
 
             force_ocr = self.should_run_ocr(existing_entries)
@@ -381,8 +380,8 @@ class QuestionHandler:
             self.results_to_process.append({
                 "qna_id": qna_id,
                 "question": question,
-                "draft_answer": answer,  # Store the draft answer.
-                "answer": "",  # Leave the formal answer empty initially.
+                "draft_answer": answer,
+                "answer": "",
                 "original_answer": answer,
                 "modification_note": "자동 생성된 답변",
                 "special_note": "답변 생성됨",

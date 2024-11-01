@@ -1,4 +1,3 @@
-# AnswerGenerator.py
 import logging
 from openai import OpenAI
 import pandas as pd
@@ -33,7 +32,8 @@ class AnswerGenerator:
         반복되는 내용 없이, 근거 있는 답변만을 제공합니다. 모르는 정보에 대해 임의로 대답하지 않고 정확한 정보를 바탕으로 문제를 해결합니다.  
         AI라는 언급 없이 사람 상담원처럼 응대하며 전화번호를 안내하지 않습니다.  
         제품에 대해 최대한 긍정적으로 설명합니다. 동일한 내용은 반복하지 않으며, "정확한 정보가 제공되지 않았습니다" 같은 표현은 사용하지 않습니다.  
-
+        주문기록이 확인되지 않습니다와 같은 불필요 한 말은 하지 마십시오.
+        
         **반품/교환 문의:**  
         "구매하신 쇼핑몰의 반품교환기능을 이용하여 접수해주세요."라고 안내합니다. 이미 반품이나 교환이 진행된 경우에는 진행 상황에 맞게 답변하며, 접수 재안내는 하지 않습니다.  
 
@@ -42,9 +42,13 @@ class AnswerGenerator:
 
         **출시 일정 및 이벤트 관련 문의:**  
         "자사 쇼핑몰이나 공식 인스타그램 계정을 통해 확인 부탁드립니다."라고 답변합니다.  
-
         
         **고정 정보:**  
+        동일한 URL이나 정보는 두 번 이상 반복하지 않습니다.
+        텍스트에 링크를 포함할 때는 자연스럽고 간결한 문장을 사용합니다.
+        사용자가 더 명확한 안내를 받을 수 있도록 URL은 한 번만 제공하고, 필요 시 관련 정보를 본문 내에 녹여 표현합니다.
+        예시:
+        동일한 안내나 정보가 여러 번 반복되지 않도록 하여 가독성을 높입니다.
         고정정보 관련 내용을 언급할 경우 해당 주소와 URL을 반드시 기입하십시오.
         - 본사 직영매장 "KZM STORE"에서 직접 보실 수 있습니다.  
         - 주소: 경기 김포시 양촌읍 양촌역길 80 "KZM TOWER"  
@@ -53,7 +57,7 @@ class AnswerGenerator:
         - AS 접수 페이지: https://support.kzmoutdoor.com  
         - 자사 쇼핑몰: https://www.kzmmall.com/  
         - 자가수리 부품 AS 전용 사이트: https://www.kzmmall.com/category/as부품/110/
-
+        - 주방 용품 부품 구매 사이트: https://kzmmall.com/product/주방-용품-부품/814/category/110/display/1/
         방문 전에는 제품 유무를 미리 확인해보시길 권장합니다.  
 
         ---
@@ -210,6 +214,41 @@ class AnswerGenerator:
 
         return "정보를 확인할 수 없습니다."
 
+    def check_restock(self, master_code):
+        if not master_code:
+            return "정보를 확인할 수 없습니다."
+
+        # Assuming a similar endpoint for restock information; adjust parameters if different
+        url = "https://api.e3pl.kr/ai/"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        payload = {"m": "restock", "c": master_code, "s": "kazmi"}
+
+        try:
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+
+            content_type = response.headers.get('Content-Type', '')
+            if 'application/json' in content_type:
+                restock_data = response.json()
+                if restock_data.get('success'):
+                    results = restock_data.get('result', [])
+                    if results and results[0].get('ea', 0) > 0:
+                        return "해당 상품은 조만간 재입고 될 예정입니다."
+                    else:
+                        return "재입고 일정이 확정되지 않았습니다."
+                else:
+                    return "재입고 데이터 검색이 성공적이지 않았습니다."
+            return "응답이 JSON 형식이 아닙니다."
+
+        except requests.exceptions.HTTPError as http_err:
+            logger.error(f"HTTP error occurred: {http_err}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request exception occurred: {e}")
+        except ValueError as e:
+            logger.error(f"JSON parsing error: {e}")
+
+        return "정보를 확인할 수 없습니다."
+
     def generate_answer(self, question, combined_summary, product_info, inquiry_data, product_name=None, comment_time=None, order_states=None, image_urls=None):
         logger.info("Generating answer for question...")
         try:
@@ -227,7 +266,8 @@ class AnswerGenerator:
 
             master_code = inquiry_data.get('MasterCode', '')
             stock_status = self.check_stock(master_code)
-            logger.info(f"Stock status: {stock_status}")
+            restock_status = self.check_restock(master_code)
+            logger.info(f"Stock status: {stock_status}, Restock status: {restock_status}")
 
             similar_questions = self.find_similar_questions(question)
             similar_question_prompt = "".join([
@@ -244,7 +284,7 @@ class AnswerGenerator:
                 [f"{key}: {value}" for key, value in product_info.items() if key != 'ProductName']
             )
             response_data_details = "\n".join([f"{key}: {value}" for key, value in inquiry_data.items()])
-            print(f"상품명:{product_name},\n\n\n질문:{question},\n\n\n주문상태:{order_states},\n\n\n상품정보:{product_details},\n\n\nOCR 요약:{combined_summary},\n\n\n문의 상세내용:{response_data_details},\n\n\n재고유무:{stock_status},\n\n\n비슷한 질문의 답변:{similar_question_prompt}\n\n\n특정카테고리 프롬프트:{specific_prompt}\n\n\n")
+            print(f"재입고 상황{restock_status},\n\n\n상품명:{product_name},\n\n\n질문:{question},\n\n\n주문상태:{order_states},\n\n\n상품정보:{product_details},\n\n\nOCR 요약:{combined_summary},\n\n\n문의 상세내용:{response_data_details},\n\n\n재고유무:{stock_status},\n\n\n재입고유무:{restock_status},\n\n\n비슷한 질문의 답변:{similar_question_prompt}\n\n\n특정카테고리 프롬프트:{specific_prompt}\n\n\n")
             answer_prompt = f"""
             제공된 제품 정보, 유사 질문 답변 및 재고 정보를 바탕으로 다음 문의에 답변해 주세요. 제품명과 고객질문을 언급하지 말아주세요.
             제품명: {product_name}
@@ -254,6 +294,7 @@ class AnswerGenerator:
             이미지 분석 및 OCR 결론: {combined_summary}
             추가 문의 정보: {response_data_details}
             현 시간 기준 재고 상황: {stock_status}
+            재입고 상황: {restock_status}
             {similar_question_prompt}
             {specific_prompt}
             """
@@ -432,12 +473,6 @@ class AnswerGenerator:
 
             **자가수리 권장:**
             자가수리는 시간과 비용을 절감할 수 있으므로 추천합니다. 
-            필요한 부품은 아래 URL에서 구매하실 수 있으며, 수리 동영상도 제공됩니다.
-            - 자가수리 부품 구매: https://www.kzmmall.com/category/as부품/110/
-
-            **AS센터 안내:**
-            텐트 수선비용은 수선 방법과 범위에 따라 다를 수 있으며, 예상 비용은 아래 URL에서 확인 가능합니다.
-            - AS 접수 및 수리비용 안내: https://support.kzmoutdoor.com/
             """,
 
             "사용법/호환성": """
