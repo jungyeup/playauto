@@ -1,7 +1,7 @@
 import os
 import requests
 import base64
-from PIL import Image, ImageEnhance, ImageFile
+from PIL import Image, ImageEnhance, ImageFile, ImageFilter
 from io import BytesIO
 from bs4 import BeautifulSoup
 import pytesseract
@@ -10,6 +10,7 @@ import cv2
 from dotenv import load_dotenv
 from openai import OpenAI
 from typing import List
+import re
 
 # Allow truncated images to be loaded
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -22,7 +23,7 @@ class OCRHandler:
             raise ValueError("OPENAI_API_KEY must be set in the .env file")
         
         self.client = OpenAI(api_key=openai_api_key)
-        self.model = "gpt-4-turbo-2024-04-09"
+        self.model = "gpt-4o-2024-11-20"
         self.system_prompt = """
         당신은 한국어로 작업하며, OCR 및 다양한 데이터 소스(이미지, HTML 등)에서 추출된 정보를 기반으로 상품의 형태와 생김새를 묘사하고 분석하고 상품 정보를 상세히 분석하고 정리하는 AI 에이전트입니다. 모든 입력 데이터에 기반하여 고객이 상품의 모든 특징을 정확히 이해할 수 있도록 상세하고 구체적인 정보를 제공합니다.
 
@@ -65,14 +66,30 @@ class OCRHandler:
 
     @staticmethod
     def preprocess_image(img, upscale_factor=4):
+        """
+        Preprocesses the image for OCR by resizing, enhancing contrast, denoising, and thresholding.
+        """
         try:
+            # Resize the image for better OCR accuracy
             img = img.resize((img.width * upscale_factor, img.height * upscale_factor), Image.LANCZOS)
+            
+            # Enhance the contrast of the image
             enhancer = ImageEnhance.Contrast(img)
-            enhanced_img = enhancer.enhance(64)
+            enhanced_img = enhancer.enhance(2.0)  # Adjusted contrast factor
+            
+            # Convert to a NumPy array for OpenCV processing
             enhanced_img_np = np.array(enhanced_img)
+
+            # Convert to grayscale
             gray_img = cv2.cvtColor(enhanced_img_np, cv2.COLOR_BGR2GRAY)
-            thresh_img = cv2.adaptiveThreshold(gray_img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-            denoised_img = cv2.fastNlMeansDenoising(thresh_img, None, 30, 7, 21)
+
+            # Apply Otsu's thresholding for better binarization
+            _, binary_img = cv2.threshold(gray_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Denoise the image
+            denoised_img = cv2.fastNlMeansDenoising(binary_img, None, h=30, templateWindowSize=7, searchWindowSize=21)
+
+            # Convert back to PIL Image for compatibility
             processed_img = Image.fromarray(denoised_img)
             return processed_img
         except Exception as e:
@@ -92,14 +109,39 @@ class OCRHandler:
         return split_images
 
     @staticmethod
+    def clean_ocr_output(ocr_text):
+        """
+        Clean and refine OCR output to remove unwanted characters and extract numeric values.
+        """
+        # Remove all characters except digits
+        return re.sub(r'[^0-9]', '', ocr_text)
+
+    @staticmethod
     def ocr_from_image(img):
+        """
+        Perform OCR on a preprocessed image using pytesseract with additional configurations.
+        """
         try:
+            # Preprocess the image
             preprocessed_img = OCRHandler.preprocess_image(img)
+
+            # Split large images into smaller parts if necessary
             split_images = OCRHandler.split_image_vertically(preprocessed_img)
+
+            # Perform OCR on each split image
             ocr_results = []
             for idx, part_img in enumerate(split_images):
-                text = pytesseract.image_to_string(part_img, lang='kor+eng')
+                # Configure pytesseract for better accuracy on numeric data
+                custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789'
+                text = pytesseract.image_to_string(part_img, lang='eng', config=custom_config)
+
+                # Clean and refine OCR output
+                text = OCRHandler.clean_ocr_output(text)
+
+                # Append results with part indexing for clarity
                 ocr_results.append(f"Part {idx + 1}:\n{text.strip()}")
+
+            # Join results from all parts
             return "\n".join(ocr_results)
         except Exception as e:
             return f"Error in OCR processing: {e}"
@@ -183,6 +225,46 @@ class OCRHandler:
         except Exception as e:
             return [{'ocr_text': f"Error in OCR from HTML content: {e}"}]
 
+    def ocr_from_image_urls(self, image_urls):
+        ocr_results = []
+        for image_url in image_urls:
+            ocr_text = self.ocr_from_image_url(image_url)
+            if isinstance(ocr_text, str) and ocr_text:
+                ocr_results.append({'image_url': image_url, 'ocr_text': ocr_text})
+        return ocr_results
+
+    def summarize_ocr_results(self, ocr_results, image_urls):
+        summaries = []
+        try:
+            combined_text = "\n".join([result.get('ocr_text', '') for result in ocr_results if isinstance(result, dict)])
+            image_urls_text = "\n".join(image_urls)
+            prompt_text = f"Images URLs: {image_urls_text}\nText Content:\n{combined_text}"
+            shortened_ocr_text = self.shorten_text_to_token_limit(prompt_text, 8192)
+
+            chat_completion = self.client.chat.completions.create(
+                model="gpt-4o",
+                temperature=0.7,
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": shortened_ocr_text},
+                ]
+            )
+
+            summary = chat_completion.choices[0].message.content
+            summaries.append({'summary': summary})
+
+            return summaries
+        except Exception as e:
+            summaries.append({'summary': f"Error in generating OCR summary: {e}"})
+            return summaries
+
+    @staticmethod
+    def shorten_text_to_token_limit(text, token_limit):
+        tokens = text.split()
+        if len(tokens) > token_limit:
+            return " ".join(tokens[:token_limit])
+        return text
+
     def analyze_images_with_function_calling(self, image_urls: List[str]) -> str:
         processed_images = []
         for url in image_urls:
@@ -239,46 +321,6 @@ class OCRHandler:
         except Exception as e:
             print(f"Error during OpenAI API call: {e}")
             return "Failed to process images."
-
-    def summarize_ocr_results(self, ocr_results, image_urls):
-        summaries = []
-        try:
-            combined_text = "\n".join([result.get('ocr_text', '') for result in ocr_results if isinstance(result, dict)])
-            image_urls_text = "\n".join(image_urls)
-            prompt_text = f"Images URLs: {image_urls_text}\nText Content:\n{combined_text}"
-            shortened_ocr_text = self.shorten_text_to_token_limit(prompt_text, 8192)
-
-            chat_completion = self.client.chat.completions.create(
-                model="gpt-4o",
-                temperature=0.7,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": shortened_ocr_text},
-                ]
-            )
-
-            summary = chat_completion.choices[0].message.content
-            summaries.append({'summary': summary})
-
-            return summaries
-        except Exception as e:
-            summaries.append({'summary': f"Error in generating OCR summary: {e}"})
-            return summaries
-
-    @staticmethod
-    def shorten_text_to_token_limit(text, token_limit):
-        tokens = text.split()
-        if len(tokens) > token_limit:
-            return " ".join(tokens[:token_limit])
-        return text
-
-    def ocr_from_image_urls(self, image_urls):
-        ocr_results = []
-        for image_url in image_urls:
-            ocr_text = self.ocr_from_image_url(image_url)
-            if isinstance(ocr_text, str) and ocr_text:
-                ocr_results.append({'image_url': image_url, 'ocr_text': ocr_text})
-        return ocr_results
 
     def summarize_summaries(self, image_summaries):
         # Integrate OCR summaries and image analysis into a comprehensive summary
