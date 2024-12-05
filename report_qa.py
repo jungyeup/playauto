@@ -39,38 +39,7 @@ def generate_korean_analysis(draft_answer, final_answer):
     
     return analysis
 
-def create_docx_report(df, output_path):
-    """Create a DOCX report with all inquiries organized by product."""
-    document = Document()
-    document.add_heading('제품별 문의 종합 보고서', level=1)
 
-    for _, row in df.iterrows():
-        document.add_heading(f"제품명: {row['상품명']}", level=2)
-        document.add_paragraph(f"문의내용: {row['문의내용']}")
-        document.add_paragraph(f"답변초안: {row['답변초안']}")
-        document.add_paragraph(f"답변내용: {row['답변내용']}")
-
-        # Generate analysis for the differences
-        analysis = generate_korean_analysis(row['답변초안'], row['답변내용'])
-        document.add_paragraph(f"분석 내용: {analysis}")
-
-    # Save the document
-    document.save(output_path)
-    print(f"Report saved to {output_path}")
-
-def main(file_path, output_file):
-    try:
-        # Load Excel data
-        df = fetch_data_from_excel(file_path)
-
-        # Create a single DOCX report with all data
-        create_docx_report(df, output_file)
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
-
-if __name__ == "__main__":
-    # Example usage
     FILE_PATH = 'data/questions_answers.xlsx'
     OUTPUT_FILE = '제품별_문의_종합_보고서.docx'
 
