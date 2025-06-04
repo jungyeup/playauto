@@ -10,7 +10,7 @@
 6. 모범답안 저장
 7. 지속적으로 모범답안을 학습 후 다음 답변에 반영
 
-
+복잡한 상세페이지에서 정확히 OCR하여 상품에대한 정보를 정리합니다.
 아래는 실제사용된 OCR 예시입니다.
 https://www.kzmoutdoor.com/main/bbs//content.php?co_id=corinto_product_dt&it_id=K251T3T07
 
